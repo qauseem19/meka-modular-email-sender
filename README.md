@@ -7,7 +7,7 @@ A robust FastAPI application for sending emails via SMTP with comprehensive erro
 - ✅ Send emails via SMTP with custom credentials
 - ✅ Support for HTML and plain text emails
 - ✅ CC and BCC recipients
-- ✅ File attachments (Base64 encoded)
+- ✅ File attachments (URL-based download)
 - ✅ Comprehensive error handling
 - ✅ CORS enabled for web applications
 - ✅ Structured JSON response format
@@ -95,15 +95,41 @@ All responses follow this JSON structure [[memory:4977149]]:
   "bcc": ["bcc@example.com"],
   "attachments": [
     {
-      "filename": "document.pdf",
-      "content": "base64_encoded_content_here",
-      "content_type": "application/pdf"
+      "url": "https://example.com/files/document.pdf",
+      "filename": "custom-name.pdf"
     }
   ]
 }
 ```
 
 **Note:** SMTP credentials are now loaded from environment variables (`.env` file) for security.
+
+### Attachment Format
+
+Attachments are now handled via URLs instead of base64 encoding:
+
+```json
+{
+  "attachments": [
+    {
+      "url": "https://example.com/files/document.pdf",
+      "filename": "custom-name.pdf"  // Optional: custom filename
+    },
+    {
+      "url": "https://cdn.example.com/images/logo.png"
+      // filename will be auto-detected from URL
+    }
+  ]
+}
+```
+
+**Attachment Features:**
+- ✅ **URL-based**: Just provide the file URL, no need to encode content
+- ✅ **Auto-detection**: Filename and content type are automatically detected
+- ✅ **Custom naming**: Option to override the filename
+- ✅ **Size limits**: Maximum 10MB per file (configurable)
+- ✅ **Security**: Timeout protection and URL validation
+- ✅ **Multiple formats**: Supports all common file types (PDF, images, documents, etc.)
 
 ### Response Example
 

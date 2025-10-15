@@ -11,6 +11,10 @@ import logging
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+import requests
+import mimetypes
+from urllib.parse import urlparse
+import tempfile
 
 # Load environment variables
 load_dotenv()
@@ -34,12 +38,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Request Models
-class EmailAttachment(BaseModel):
-    filename: str
-    content: str  # Base64 encoded content
-    content_type: str = "application/octet-stream"
-
 class SendEmailRequest(BaseModel):
     to_email: EmailStr
     subject: str
@@ -49,7 +47,7 @@ class SendEmailRequest(BaseModel):
     reply_to: Optional[EmailStr] = None
     cc: Optional[List[EmailStr]] = None
     bcc: Optional[List[EmailStr]] = None
-    attachments: Optional[List[EmailAttachment]] = None
+    attachments: Optional[List[str]] = None
 
 class ApiResponse(BaseModel):
     version: str = "1.0.0.0"
@@ -58,6 +56,96 @@ class ApiResponse(BaseModel):
     isError: Optional[bool] = None
     responseException: Optional[str] = None
     result: Optional[dict] = None
+
+# Helper function to download file from URL
+def download_file_from_url(url: str, max_size_mb: int = 10) -> tuple[bytes, str, str]:
+    """
+    Download file from URL and return content, filename, and content type
+    
+    Args:
+        url: URL to download the file from
+        max_size_mb: Maximum file size in MB (default: 10MB)
+    
+    Returns:
+        tuple: (file_content, filename, content_type)
+    
+    Raises:
+        HTTPException: If download fails or file is too large
+    """
+    try:
+        # Validate URL
+        parsed_url = urlparse(url)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid URL format: {url}"
+            )
+        
+        # Download file with timeout and size limit
+        max_size_bytes = max_size_mb * 1024 * 1024
+        
+        response = requests.get(
+            url, 
+            timeout=30, 
+            stream=True,
+            headers={'User-Agent': 'FastAPI-Email-Service/1.0'}
+        )
+        response.raise_for_status()
+        
+        # Check content length if available
+        content_length = response.headers.get('content-length')
+        if content_length and int(content_length) > max_size_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Maximum size allowed: {max_size_mb}MB"
+            )
+        
+        # Download content
+        content = b""
+        for chunk in response.iter_content(chunk_size=8192):
+            content += chunk
+            if len(content) > max_size_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File too large. Maximum size allowed: {max_size_mb}MB"
+                )
+        
+        # Extract filename from URL or Content-Disposition header
+        filename = None
+        
+        # Try to get filename from Content-Disposition header
+        content_disposition = response.headers.get('content-disposition', '')
+        if 'filename=' in content_disposition:
+            filename = content_disposition.split('filename=')[1].strip('"\'')
+        
+        # If no filename in header, extract from URL
+        if not filename:
+            filename = os.path.basename(parsed_url.path)
+            if not filename or filename == '/':
+                filename = 'attachment'
+        
+        # Detect content type
+        content_type = response.headers.get('content-type', 'application/octet-stream')
+        if content_type == 'application/octet-stream':
+            # Try to guess from filename
+            guessed_type, _ = mimetypes.guess_type(filename)
+            if guessed_type:
+                content_type = guessed_type
+        
+        return content, filename, content_type
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to download file from URL {url}: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to download file from URL: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error downloading file from URL {url}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing attachment URL: {str(e)}"
+        )
 
 # Email Service
 class EmailService:
@@ -100,15 +188,29 @@ class EmailService:
             # Add attachments if any
             if request.attachments:
                 for attachment in request.attachments:
-                    part = MIMEBase('application', 'octet-stream')
-                    import base64
-                    part.set_payload(base64.b64decode(attachment.content))
-                    encoders.encode_base64(part)
-                    part.add_header(
-                        'Content-Disposition',
-                        f'attachment; filename= {attachment.filename}'
-                    )
-                    msg.attach(part)
+                    try:
+                        # Download file from URL
+                        file_content, filename, content_type = download_file_from_url(attachment)
+                        
+                        # Create attachment part
+                        main_type, sub_type = content_type.split('/', 1) if '/' in content_type else ('application', 'octet-stream')
+                        part = MIMEBase(main_type, sub_type)
+                        part.set_payload(file_content)
+                        encoders.encode_base64(part)
+                        part.add_header(
+                            'Content-Disposition',
+                            f'attachment; filename="{filename}"'
+                        )
+                        msg.attach(part)
+                        
+                        logger.info(f"Successfully attached file: {filename} from URL: {attachment}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to process attachment from URL {attachment}: {str(e)}")
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Failed to process attachment from URL {attachment}: {str(e)}"
+                        )
             
             # Connect to SMTP server
             self.smtp_connection = smtplib.SMTP(self.smtp_server, self.smtp_port)
@@ -216,7 +318,7 @@ async def send_email(request: SendEmailRequest):
     - **reply_to**: Optional reply-to email address
     - **cc**: Optional CC recipients
     - **bcc**: Optional BCC recipients
-    - **attachments**: Optional file attachments
+    - **attachments**: Optional file attachments (URL-based download)
     
     Note: SMTP credentials are loaded from environment variables
     """
